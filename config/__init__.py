@@ -1,0 +1,156 @@
+"""Configuration management for the Alpaca trading system."""
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field
+from typing import List, Tuple
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+def _env_float(key: str, default: float) -> float:
+    return float(os.getenv(key, default))
+
+
+def _env_int(key: str, default: int) -> int:
+    return int(os.getenv(key, default))
+
+
+def _env_str(key: str, default: str = "") -> str:
+    return os.getenv(key, default)
+
+
+@dataclass
+class AlpacaConfig:
+    api_key: str = field(default_factory=lambda: _env_str("ALPACA_API_KEY"))
+    secret_key: str = field(default_factory=lambda: _env_str("ALPACA_SECRET_KEY"))
+    base_url: str = field(
+        default_factory=lambda: _env_str(
+            "ALPACA_BASE_URL", "https://paper-api.alpaca.markets"
+        )
+    )
+    trading_mode: str = field(
+        default_factory=lambda: _env_str("TRADING_MODE", "paper")
+    )
+
+    @property
+    def is_paper(self) -> bool:
+        return self.trading_mode.lower() == "paper"
+
+
+@dataclass
+class RiskConfig:
+    max_portfolio_risk_pct: float = field(
+        default_factory=lambda: _env_float("MAX_PORTFOLIO_RISK_PCT", 2.0)
+    )
+    max_daily_loss_pct: float = field(
+        default_factory=lambda: _env_float("MAX_DAILY_LOSS_PCT", 5.0)
+    )
+    max_position_size_pct: float = field(
+        default_factory=lambda: _env_float("MAX_POSITION_SIZE_PCT", 10.0)
+    )
+    max_open_positions: int = field(
+        default_factory=lambda: _env_int("MAX_OPEN_POSITIONS", 10)
+    )
+    stop_loss_pct: float = field(
+        default_factory=lambda: _env_float("STOP_LOSS_PCT", 2.0)
+    )
+    take_profit_pct: float = field(
+        default_factory=lambda: _env_float("TAKE_PROFIT_PCT", 4.0)
+    )
+
+
+@dataclass
+class MeanReversionConfig:
+    lookback_period: int = field(
+        default_factory=lambda: _env_int("MR_LOOKBACK_PERIOD", 20)
+    )
+    std_threshold: float = field(
+        default_factory=lambda: _env_float("MR_STD_THRESHOLD", 2.0)
+    )
+
+
+@dataclass
+class MomentumConfig:
+    rsi_period: int = field(
+        default_factory=lambda: _env_int("MOM_RSI_PERIOD", 14)
+    )
+    macd_fast: int = field(default_factory=lambda: _env_int("MOM_MACD_FAST", 12))
+    macd_slow: int = field(default_factory=lambda: _env_int("MOM_MACD_SLOW", 26))
+    macd_signal: int = field(
+        default_factory=lambda: _env_int("MOM_MACD_SIGNAL", 9)
+    )
+    rsi_overbought: float = field(
+        default_factory=lambda: _env_float("MOM_RSI_OVERBOUGHT", 70.0)
+    )
+    rsi_oversold: float = field(
+        default_factory=lambda: _env_float("MOM_RSI_OVERSOLD", 30.0)
+    )
+
+
+@dataclass
+class PairsTradingConfig:
+    lookback: int = field(
+        default_factory=lambda: _env_int("PAIRS_LOOKBACK", 60)
+    )
+    z_score_entry: float = field(
+        default_factory=lambda: _env_float("PAIRS_Z_SCORE_ENTRY", 2.0)
+    )
+    z_score_exit: float = field(
+        default_factory=lambda: _env_float("PAIRS_Z_SCORE_EXIT", 0.5)
+    )
+
+    @property
+    def pairs(self) -> List[Tuple[str, str]]:
+        raw = _env_str("PAIRS_LIST", "AAPL:MSFT,JPM:BAC")
+        result = []
+        for pair in raw.split(","):
+            parts = pair.strip().split(":")
+            if len(parts) == 2:
+                result.append((parts[0].strip(), parts[1].strip()))
+        return result
+
+
+@dataclass
+class AlertConfig:
+    email: str = field(default_factory=lambda: _env_str("ALERT_EMAIL", ""))
+    smtp_host: str = field(
+        default_factory=lambda: _env_str("SMTP_HOST", "smtp.gmail.com")
+    )
+    smtp_port: int = field(default_factory=lambda: _env_int("SMTP_PORT", 587))
+    smtp_user: str = field(default_factory=lambda: _env_str("SMTP_USER", ""))
+    smtp_password: str = field(
+        default_factory=lambda: _env_str("SMTP_PASSWORD", "")
+    )
+
+
+@dataclass
+class AppConfig:
+    alpaca: AlpacaConfig = field(default_factory=AlpacaConfig)
+    risk: RiskConfig = field(default_factory=RiskConfig)
+    mean_reversion: MeanReversionConfig = field(
+        default_factory=MeanReversionConfig
+    )
+    momentum: MomentumConfig = field(default_factory=MomentumConfig)
+    pairs_trading: PairsTradingConfig = field(
+        default_factory=PairsTradingConfig
+    )
+    alerts: AlertConfig = field(default_factory=AlertConfig)
+    db_path: str = field(
+        default_factory=lambda: _env_str("DB_PATH", "trading.db")
+    )
+    log_level: str = field(
+        default_factory=lambda: _env_str("LOG_LEVEL", "INFO")
+    )
+    log_dir: str = field(
+        default_factory=lambda: _env_str("LOG_DIR", "logs")
+    )
+
+    @property
+    def watchlist(self) -> List[str]:
+        raw = _env_str(
+            "WATCHLIST",
+            "AAPL,MSFT,GOOGL,AMZN,TSLA,META,NVDA,JPM,BAC,WMT",
+        )
+        return [s.strip() for s in raw.split(",") if s.strip()]

@@ -1,0 +1,50 @@
+services:
+  bot:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - trading_data:/data
+      - trading_logs:/app/logs
+    environment:
+      DB_PATH: /data/trading.db
+      LOG_DIR: /app/logs
+      DASHBOARD_ENABLED: "false"
+
+  dashboard:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    command: ["python", "-c", "
+import os; os.environ.setdefault('DASHBOARD_ENABLED','true');
+from config import AppConfig;
+from dashboard import Dashboard;
+from data_handler import DataHandler;
+from risk_manager import RiskManager;
+cfg = AppConfig();
+cfg.dashboard.enabled = True;
+data = DataHandler(cfg.alpaca);
+risk = RiskManager(cfg.risk, db_path=os.environ.get('DB_PATH','/data/trading.db'));
+d = Dashboard(cfg.dashboard, db_path=os.environ.get('DB_PATH','/data/trading.db'),
+    get_positions_fn=data.get_positions,
+    get_performance_fn=lambda: risk.performance_summary(0));
+d.start();
+import time; [time.sleep(1) for _ in iter(int, 1)]
+    "]
+    ports:
+      - "8080:8080"
+    volumes:
+      - trading_data:/data
+      - trading_logs:/app/logs
+    environment:
+      DB_PATH: /data/trading.db
+      LOG_DIR: /app/logs
+      DASHBOARD_ENABLED: "true"
+      DASHBOARD_HOST: "0.0.0.0"
+      DASHBOARD_PORT: "8080"
+    depends_on:
+      - bot
+
+volumes:
+  trading_data:
+  trading_logs:

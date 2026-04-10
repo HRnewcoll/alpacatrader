@@ -21,6 +21,11 @@ def _env_str(key: str, default: str = "") -> str:
     return os.getenv(key, default)
 
 
+def _env_bool(key: str, default: bool) -> bool:
+    v = os.getenv(key, str(default)).lower()
+    return v in ("1", "true", "yes")
+
+
 @dataclass
 class AlpacaConfig:
     api_key: str = field(default_factory=lambda: _env_str("ALPACA_API_KEY"))
@@ -58,6 +63,12 @@ class RiskConfig:
     )
     take_profit_pct: float = field(
         default_factory=lambda: _env_float("TAKE_PROFIT_PCT", 4.0)
+    )
+    trailing_stop_pct: float = field(
+        default_factory=lambda: _env_float("TRAILING_STOP_PCT", 0.0)
+    )
+    max_bid_ask_spread_pct: float = field(
+        default_factory=lambda: _env_float("MAX_BID_ASK_SPREAD_PCT", 0.0)
     )
 
 
@@ -123,6 +134,126 @@ class AlertConfig:
     smtp_password: str = field(
         default_factory=lambda: _env_str("SMTP_PASSWORD", "")
     )
+    telegram_token: str = field(
+        default_factory=lambda: _env_str("TELEGRAM_TOKEN", "")
+    )
+    telegram_chat_id: str = field(
+        default_factory=lambda: _env_str("TELEGRAM_CHAT_ID", "")
+    )
+    slack_webhook_url: str = field(
+        default_factory=lambda: _env_str("SLACK_WEBHOOK_URL", "")
+    )
+
+
+@dataclass
+class SchedulerConfig:
+    use_market_hours: bool = field(
+        default_factory=lambda: _env_bool("USE_MARKET_HOURS", True)
+    )
+    warmup_minutes: int = field(
+        default_factory=lambda: _env_int("SCHEDULER_WARMUP_MINUTES", 5)
+    )
+    closeout_buffer_minutes: int = field(
+        default_factory=lambda: _env_int("SCHEDULER_CLOSEOUT_MINUTES", 5)
+    )
+
+
+@dataclass
+class NewsConfig:
+    enabled: bool = field(
+        default_factory=lambda: _env_bool("NEWS_ENABLED", True)
+    )
+    lookback_hours: int = field(
+        default_factory=lambda: _env_int("NEWS_LOOKBACK_HOURS", 24)
+    )
+    negative_threshold: float = field(
+        default_factory=lambda: _env_float("NEWS_NEGATIVE_THRESHOLD", -0.3)
+    )
+    positive_threshold: float = field(
+        default_factory=lambda: _env_float("NEWS_POSITIVE_THRESHOLD", 0.2)
+    )
+
+
+@dataclass
+class ScreenerConfig:
+    enabled: bool = field(
+        default_factory=lambda: _env_bool("SCREENER_ENABLED", True)
+    )
+    top_n: int = field(default_factory=lambda: _env_int("SCREENER_TOP_N", 20))
+    min_avg_volume: int = field(
+        default_factory=lambda: _env_int("SCREENER_MIN_AVG_VOLUME", 500_000)
+    )
+    lookback_days: int = field(
+        default_factory=lambda: _env_int("SCREENER_LOOKBACK_DAYS", 10)
+    )
+
+    @property
+    def universe(self) -> List[str]:
+        raw = _env_str("SCREENER_UNIVERSE", "")
+        return [s.strip() for s in raw.split(",") if s.strip()]
+
+
+@dataclass
+class RebalancerConfig:
+    enabled: bool = field(
+        default_factory=lambda: _env_bool("REBALANCER_ENABLED", True)
+    )
+    check_interval_hours: int = field(
+        default_factory=lambda: _env_int("REBALANCER_CHECK_INTERVAL_HOURS", 168)
+    )
+
+
+@dataclass
+class OptimizerConfig:
+    lookback_months: int = field(
+        default_factory=lambda: _env_int("OPTIMIZER_LOOKBACK_MONTHS", 6)
+    )
+    write_env: bool = field(
+        default_factory=lambda: _env_bool("OPTIMIZER_WRITE_ENV", False)
+    )
+
+
+@dataclass
+class DashboardConfig:
+    enabled: bool = field(
+        default_factory=lambda: _env_bool("DASHBOARD_ENABLED", False)
+    )
+    host: str = field(
+        default_factory=lambda: _env_str("DASHBOARD_HOST", "127.0.0.1")
+    )
+    port: int = field(
+        default_factory=lambda: _env_int("DASHBOARD_PORT", 8080)
+    )
+
+
+@dataclass
+class BreakoutConfig:
+    lookback_days: int = field(
+        default_factory=lambda: _env_int("BREAKOUT_LOOKBACK_DAYS", 20)
+    )
+    volume_factor: float = field(
+        default_factory=lambda: _env_float("BREAKOUT_VOLUME_FACTOR", 1.5)
+    )
+
+
+@dataclass
+class VWAPReversionConfig:
+    std_threshold: float = field(
+        default_factory=lambda: _env_float("VWAP_STD_THRESHOLD", 1.5)
+    )
+    lookback_days: int = field(
+        default_factory=lambda: _env_int("VWAP_LOOKBACK_DAYS", 20)
+    )
+
+
+@dataclass
+class MultiTimeframeConfig:
+    enabled: bool = field(
+        default_factory=lambda: _env_bool("MTF_ENABLED", False)
+    )
+    trend_lookback_days: int = field(
+        default_factory=lambda: _env_int("MTF_TREND_LOOKBACK_DAYS", 20)
+    )
 
 
 @dataclass
@@ -136,7 +267,20 @@ class AppConfig:
     pairs_trading: PairsTradingConfig = field(
         default_factory=PairsTradingConfig
     )
+    breakout: BreakoutConfig = field(default_factory=BreakoutConfig)
+    vwap_reversion: VWAPReversionConfig = field(
+        default_factory=VWAPReversionConfig
+    )
+    multi_timeframe: MultiTimeframeConfig = field(
+        default_factory=MultiTimeframeConfig
+    )
     alerts: AlertConfig = field(default_factory=AlertConfig)
+    scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
+    news: NewsConfig = field(default_factory=NewsConfig)
+    screener: ScreenerConfig = field(default_factory=ScreenerConfig)
+    rebalancer: RebalancerConfig = field(default_factory=RebalancerConfig)
+    optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
+    dashboard: DashboardConfig = field(default_factory=DashboardConfig)
     db_path: str = field(
         default_factory=lambda: _env_str("DB_PATH", "trading.db")
     )

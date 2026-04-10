@@ -8,6 +8,8 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from typing import Optional
 
+import requests
+
 from config import AlertConfig
 
 
@@ -77,6 +79,49 @@ class Alerter:
             self.logger.error("Failed to send email alert: %s", exc)
             return False
 
+    def send_telegram(self, subject: str, body: str) -> bool:
+        """Send a Telegram message via the Bot API. Returns True on success."""
+        if not self.config.telegram_token or not self.config.telegram_chat_id:
+            self.logger.debug("Telegram alerting not configured, skipping.")
+            return False
+        try:
+            text = f"*[AlpacaTrader]* {subject}\n{body}"
+            url = f"https://api.telegram.org/bot{self.config.telegram_token}/sendMessage"
+            resp = requests.post(
+                url,
+                json={
+                    "chat_id": self.config.telegram_chat_id,
+                    "text": text,
+                    "parse_mode": "Markdown",
+                },
+                timeout=10,
+            )
+            resp.raise_for_status()
+            self.logger.info("Telegram alert sent: %s", subject)
+            return True
+        except Exception as exc:
+            self.logger.error("Failed to send Telegram alert: %s", exc)
+            return False
+
+    def send_slack(self, subject: str, body: str) -> bool:
+        """Send a Slack message via an incoming webhook. Returns True on success."""
+        if not self.config.slack_webhook_url:
+            self.logger.debug("Slack alerting not configured, skipping.")
+            return False
+        try:
+            text = f"*[AlpacaTrader]* {subject}\n{body}"
+            resp = requests.post(
+                self.config.slack_webhook_url,
+                json={"text": text},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            self.logger.info("Slack alert sent: %s", subject)
+            return True
+        except Exception as exc:
+            self.logger.error("Failed to send Slack alert: %s", exc)
+            return False
+
     def alert(
         self,
         subject: str,
@@ -84,11 +129,13 @@ class Alerter:
         level: str = "INFO",
         send_email: bool = False,
     ) -> None:
-        """Log an alert and optionally send an email."""
+        """Log an alert and optionally send an email, Telegram message, and Slack message."""
         log_fn = getattr(self.logger, level.lower(), self.logger.info)
         log_fn("[ALERT] %s: %s", subject, body)
         if send_email:
             self.send_email(subject, body)
+        self.send_telegram(subject, body)
+        self.send_slack(subject, body)
 
     def trade_alert(
         self,

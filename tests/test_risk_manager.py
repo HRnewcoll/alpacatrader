@@ -109,3 +109,17 @@ class TestRiskManager:
         risk_manager.update_daily_pnl(500.0, 100_000.0)
         risk_manager.update_daily_pnl(300.0, 100_000.0)
         assert risk_manager.get_daily_pnl() == pytest.approx(800.0)
+
+    def test_generate_daily_report_returns_string(self, risk_manager):
+        report = risk_manager.generate_daily_report(100_000.0)
+        assert isinstance(report, str)
+        assert "DAILY PERFORMANCE REPORT" in report
+
+    def test_daily_report_includes_key_metrics(self, risk_manager):
+        risk_manager.record_trade("AAPL", "buy", 10, 150.0, "mean_reversion", "test")
+        risk_manager.update_daily_pnl(200.0, 100_000.0)
+        report = risk_manager.generate_daily_report(100_000.0)
+        assert "Portfolio Value" in report
+        assert "Daily P&L" in report
+        assert "Weekly P&L" in report
+        assert "Win Rate" in report

@@ -10,7 +10,7 @@ Handles:
 from __future__ import annotations
 
 import sqlite3
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
 from alerts import get_logger
@@ -238,3 +238,85 @@ class RiskManager:
             "peak_portfolio_value": self._peak_portfolio_value,
             "max_daily_loss_limit": portfolio_value * (self.config.max_daily_loss_pct / 100),
         }
+
+    def generate_daily_report(self, portfolio_value: float) -> str:
+        """Generate a formatted daily performance digest from the trade journal.
+
+        Returns a multi-line string suitable for logging or emailing.
+        """
+        today = date.today()
+        today_str = today.isoformat()
+        week_start = (today - timedelta(days=7)).isoformat()
+        month_start = (today - timedelta(days=30)).isoformat()
+
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+
+            today_trades = [
+                dict(r)
+                for r in conn.execute(
+                    "SELECT * FROM trades WHERE timestamp >= ? ORDER BY timestamp",
+                    (f"{today_str}T00:00:00",),
+                ).fetchall()
+            ]
+            weekly_pnl = (
+                conn.execute(
+                    "SELECT COALESCE(SUM(realized_pnl), 0) FROM daily_pnl WHERE trade_date >= ?",
+                    (week_start,),
+                ).fetchone()[0]
+                or 0.0
+            )
+            monthly_pnl = (
+                conn.execute(
+                    "SELECT COALESCE(SUM(realized_pnl), 0) FROM daily_pnl WHERE trade_date >= ?",
+                    (month_start,),
+                ).fetchone()[0]
+                or 0.0
+            )
+
+        daily_pnl = self.get_daily_pnl()
+        perf = self.performance_summary(portfolio_value)
+
+        def _win_rate(trades: List[Dict]) -> float:
+            if not trades:
+                return 0.0
+            return sum(1 for t in trades if t.get("pnl", 0) > 0) / len(trades) * 100
+
+        best = max(today_trades, key=lambda t: t.get("pnl", 0), default=None)
+        worst = min(today_trades, key=lambda t: t.get("pnl", 0), default=None)
+
+        strategy_pnl: Dict[str, float] = {}
+        for t in today_trades:
+            strat = t.get("strategy", "unknown")
+            strategy_pnl[strat] = strategy_pnl.get(strat, 0.0) + t.get("pnl", 0.0)
+
+        daily_pnl_pct = daily_pnl / portfolio_value * 100 if portfolio_value else 0.0
+        sep = "=" * 55
+        lines = [
+            sep,
+            f"  DAILY PERFORMANCE REPORT — {today_str}",
+            sep,
+            f"  Portfolio Value    : ${portfolio_value:>12,.2f}",
+            f"  Daily P&L          : ${daily_pnl:>+12,.2f}  ({daily_pnl_pct:+.2f}%)",
+            f"  Weekly P&L         : ${weekly_pnl:>+12,.2f}",
+            f"  Monthly P&L        : ${monthly_pnl:>+12,.2f}",
+            f"  Drawdown           : {perf['drawdown_pct']:>+10.2f}%",
+            "",
+            f"  Today's Trades     : {len(today_trades)}",
+            f"  Win Rate           : {_win_rate(today_trades):>10.2f}%",
+        ]
+        if best:
+            lines.append(
+                f"  Best Trade         : {best['symbol']} {best['side']} +${best.get('pnl', 0):.2f}"
+            )
+        if worst and worst is not best:
+            lines.append(
+                f"  Worst Trade        : {worst['symbol']} {worst['side']} ${worst.get('pnl', 0):.2f}"
+            )
+        if strategy_pnl:
+            lines.append("")
+            lines.append("  Strategy Breakdown:")
+            for strat, pnl in sorted(strategy_pnl.items(), key=lambda x: -x[1]):
+                lines.append(f"    {strat:20s}: ${pnl:>+10,.2f}")
+        lines.append(sep)
+        return "\n".join(lines)

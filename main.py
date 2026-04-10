@@ -4,6 +4,13 @@ Supports three operating modes:
   trade   - Run the live/paper trading loop
   backtest - Backtest strategies against historical data
   status  - Print current account and position status
+
+Advanced Features:
+  - Market regime detection for adaptive strategy selection
+  - Volatility breakout strategy
+  - Multi-timeframe analysis
+  - Dynamic parameter adjustment based on market conditions
+  - Enhanced performance analytics
 """
 from __future__ import annotations
 
@@ -18,6 +25,7 @@ from alerts import Alerter, setup_logging
 from backtest_engine import Backtester
 from config import AppConfig
 from data_handler import DataHandler
+from market_regime import MarketRegimeDetector, MarketRegime
 from risk_manager import RiskManager
 from strategies import (
     MeanReversionStrategy,
@@ -27,6 +35,7 @@ from strategies import (
     SignalType,
 )
 from strategies.base_strategy import BaseStrategy
+from strategies.volatility_breakout import VolatilityBreakoutStrategy, VolatilityBreakoutConfig
 
 
 class TradingEngine:
@@ -39,11 +48,20 @@ class TradingEngine:
         self.data = DataHandler(config.alpaca)
         self.risk = RiskManager(config.risk, db_path=config.db_path)
         self.alerter = Alerter(config.alerts)
+        
+        # Market regime detector for adaptive strategy selection
+        self.regime_detector = MarketRegimeDetector()
+        self._current_regime: Optional[MarketRegime] = None
+        self._regime_recommendations: Dict = {}
 
         self.strategies: List[BaseStrategy] = [
             MeanReversionStrategy(config.mean_reversion, config.risk),
             MomentumStrategy(config.momentum, config.risk),
             PairsTradingStrategy(config.pairs_trading, config.risk),
+            VolatilityBreakoutStrategy(
+                VolatilityBreakoutConfig(),
+                config.risk
+            ),
         ]
 
         self._running = False
@@ -97,12 +115,20 @@ class TradingEngine:
                 if not bars[sym].empty
             }
 
+        # Detect market regime and adjust strategy weights
+        self._update_regime_analysis(bars, symbols)
+
         # Check stop-loss and take-profit for open positions
         self._check_exits(positions_list, current_prices)
 
-        # Generate signals from all strategies
+        # Generate signals from all strategies (with regime-based filtering)
         all_signals: List[Signal] = []
         for strategy in self.strategies:
+            # Skip strategies that are not recommended for current regime
+            if self._should_skip_strategy(strategy.name):
+                self.logger.debug("Skipping strategy %s based on regime", strategy.name)
+                continue
+                
             try:
                 strategy_bars = {
                     sym: bars[sym]
@@ -115,6 +141,10 @@ class TradingEngine:
                     portfolio_value,
                     open_symbols,
                 )
+                
+                # Apply regime-based confidence adjustment
+                signals = self._adjust_signal_confidence(signals)
+                
                 all_signals.extend(signals)
                 self.logger.info(
                     "Strategy %s generated %d signals", strategy.name, len(signals)
@@ -130,14 +160,16 @@ class TradingEngine:
         for sig in approved:
             self._execute_signal(sig, portfolio_value)
 
-        # Log performance
+        # Log performance and regime
         perf = self.risk.performance_summary(portfolio_value)
+        regime_str = self._current_regime.value if self._current_regime else "unknown"
         self.logger.info(
-            "Performance: portfolio=%.2f daily_pnl=%.2f (%.2f%%) drawdown=%.2f%%",
+            "Performance: portfolio=%.2f daily_pnl=%.2f (%.2f%%) drawdown=%.2f%% regime=%s",
             perf["portfolio_value"],
             perf["daily_pnl"],
             perf["daily_pnl_pct"],
             perf["drawdown_pct"],
+            regime_str,
         )
 
     def _check_exits(self, positions_list, current_prices: Dict[str, float]) -> None:
@@ -165,6 +197,62 @@ class TradingEngine:
                     target,
                 )
                 self._close_position_market(sym, current_price, "take_profit")
+
+    def _update_regime_analysis(self, bars: Dict[str, pd.DataFrame], symbols: List[str]) -> None:
+        """Update market regime analysis and strategy recommendations."""
+        try:
+            # Use first symbol with sufficient data as regime indicator
+            for symbol in symbols[:5]:  # Check up to 5 symbols
+                if symbol in bars and len(bars[symbol]) > 100:
+                    regime_metrics = self.regime_detector.detect_regime(symbol, bars[symbol])
+                    if regime_metrics and regime_metrics.confidence > 0.6:
+                        self._current_regime = regime_metrics.regime
+                        self._regime_recommendations = self.regime_detector.get_regime_recommendation(regime_metrics)
+                        self.logger.info(
+                            "Market regime detected: %s (confidence=%.2f) based on %s",
+                            self._current_regime.value,
+                            regime_metrics.confidence,
+                            symbol
+                        )
+                        return
+            
+            # Default regime if no clear signal
+            self._current_regime = MarketRegime.NEUTRAL
+            self._regime_recommendations = {}
+        except Exception as exc:
+            self.logger.warning("Failed to detect market regime: %s", exc)
+            self._current_regime = MarketRegime.NEUTRAL
+            self._regime_recommendations = {}
+
+    def _should_skip_strategy(self, strategy_name: str) -> bool:
+        """Determine if a strategy should be skipped based on regime."""
+        if not self._regime_recommendations:
+            return False
+        avoid = self._regime_recommendations.get("avoid_strategies", [])
+        return strategy_name in avoid
+
+    def _adjust_signal_confidence(self, signals: List[Signal]) -> List[Signal]:
+        """Adjust signal confidence based on regime recommendations."""
+        if not self._regime_recommendations:
+            return signals
+        
+        risk_adj = self._regime_recommendations.get("risk_adjustment", 1.0)
+        
+        adjusted = []
+        for sig in signals:
+            # Create a copy with adjusted confidence
+            new_sig = Signal(
+                symbol=sig.symbol,
+                signal_type=sig.signal_type,
+                price=sig.price,
+                quantity=sig.quantity,
+                reason=sig.reason,
+                confidence=min(sig.confidence * risk_adj, 1.0),
+                metadata={**sig.metadata, "regime": self._current_regime.value if self._current_regime else "unknown"},
+            )
+            adjusted.append(new_sig)
+        
+        return adjusted
 
     def _close_position_market(self, symbol: str, price: float, reason: str) -> None:
         try:

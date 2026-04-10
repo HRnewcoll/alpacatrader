@@ -65,6 +65,11 @@ class DataHandler:
             logger.error("Failed to initialise Alpaca clients: %s", exc)
             raise
 
+    def reinit_clients(self) -> None:
+        """Re-create trading and data clients (called by the watchdog on connection failure)."""
+        logger.info("Re-initialising Alpaca clients...")
+        self._init_clients()
+
     # ------------------------------------------------------------------
     # Account helpers
     # ------------------------------------------------------------------
@@ -180,6 +185,39 @@ class DataHandler:
             return {sym: float(trades[sym].price) for sym in symbols if sym in trades}
         except Exception as exc:
             logger.error("Could not fetch latest prices: %s", exc)
+            return {}
+
+    def get_snapshots(self, symbols: List[str]) -> Dict[str, Dict]:
+        """Return snapshot data (bid, ask, last price) for *symbols*.
+
+        Each value is a dict with keys ``bid``, ``ask``, ``last_price``, and
+        ``bid_ask_spread_pct``.  Symbols for which snapshot data is unavailable
+        are omitted from the result.
+        """
+        try:
+            from alpaca.data.requests import StockSnapshotRequest
+
+            req = StockSnapshotRequest(symbol_or_symbols=symbols)
+            raw = _retry(lambda: self._data_client.get_stock_snapshot(req))
+            result: Dict[str, Dict] = {}
+            for sym in symbols:
+                snap = raw.get(sym)
+                if snap is None:
+                    continue
+                bid = float(snap.latest_quote.bid_price) if snap.latest_quote else 0.0
+                ask = float(snap.latest_quote.ask_price) if snap.latest_quote else 0.0
+                last = float(snap.latest_trade.price) if snap.latest_trade else 0.0
+                mid = (bid + ask) / 2 if bid and ask else last
+                spread_pct = ((ask - bid) / mid * 100) if mid > 0 and ask > bid else 0.0
+                result[sym] = {
+                    "bid": bid,
+                    "ask": ask,
+                    "last_price": last,
+                    "bid_ask_spread_pct": round(spread_pct, 4),
+                }
+            return result
+        except Exception as exc:
+            logger.error("Could not fetch snapshots: %s", exc)
             return {}
 
     # ------------------------------------------------------------------

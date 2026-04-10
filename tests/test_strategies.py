@@ -248,3 +248,194 @@ class TestSignal:
         r = repr(sig)
         assert "buy" in r
         assert "AAPL" in r
+
+
+# ---------------------------------------------------------------------------
+# Breakout strategy tests
+# ---------------------------------------------------------------------------
+
+from config import BreakoutConfig
+from strategies.breakout import BreakoutStrategy
+
+
+class TestBreakoutStrategy:
+    def _strategy(self):
+        cfg = BreakoutConfig(lookback_days=5, volume_factor=1.5)
+        return BreakoutStrategy(cfg, RISK_CFG)
+
+    def _make_breakout_df(self, prices, volumes=None, start="2023-01-01"):
+        if volumes is None:
+            volumes = [500_000] * len(prices)
+        dates = pd.date_range(start=start, periods=len(prices), freq="B", tz="UTC")
+        return pd.DataFrame(
+            {
+                "open": prices,
+                "high": [p * 1.01 for p in prices],
+                "low": [p * 0.99 for p in prices],
+                "close": prices,
+                "volume": volumes,
+            },
+            index=dates,
+        )
+
+    def test_buy_signal_on_breakout_with_high_volume(self):
+        """Price breaking above N-day high with elevated volume → BUY."""
+        strategy = self._strategy()
+        prices = [100.0] * 10 + [110.0]  # last bar breaks above 100
+        avg_vol = 500_000
+        volumes = [avg_vol] * 10 + [int(avg_vol * 2.0)]  # 2× avg volume
+        df = self._make_breakout_df(prices, volumes)
+        signals = strategy.generate_signals(
+            bars={"AAPL": df},
+            current_prices={"AAPL": 110.0},
+            portfolio_value=100_000.0,
+            open_positions=[],
+        )
+        buy_signals = [s for s in signals if s.is_buy and s.symbol == "AAPL"]
+        assert len(buy_signals) == 1
+        assert buy_signals[0].quantity > 0
+
+    def test_no_buy_on_low_volume_breakout(self):
+        """Breakout on below-average volume must not trigger a BUY."""
+        strategy = self._strategy()
+        prices = [100.0] * 10 + [110.0]
+        avg_vol = 500_000
+        volumes = [avg_vol] * 10 + [int(avg_vol * 0.5)]  # only half avg
+        df = self._make_breakout_df(prices, volumes)
+        signals = strategy.generate_signals(
+            bars={"AAPL": df},
+            current_prices={"AAPL": 110.0},
+            portfolio_value=100_000.0,
+            open_positions=[],
+        )
+        buy_signals = [s for s in signals if s.is_buy]
+        assert len(buy_signals) == 0
+
+    def test_sell_signal_when_price_falls_back(self):
+        """Price dropping back below the rolling high with an open position → SELL."""
+        strategy = self._strategy()
+        # Build a sequence that first breaks out, then falls back
+        prices = [100.0] * 8 + [115.0, 115.0, 95.0]
+        df = self._make_breakout_df(prices)
+        signals = strategy.generate_signals(
+            bars={"AAPL": df},
+            current_prices={"AAPL": 95.0},
+            portfolio_value=100_000.0,
+            open_positions=["AAPL"],
+        )
+        sell_signals = [s for s in signals if s.is_sell and s.symbol == "AAPL"]
+        assert len(sell_signals) == 1
+
+    def test_no_signal_insufficient_data(self):
+        strategy = self._strategy()
+        df = self._make_breakout_df([100.0] * 3)
+        signals = strategy.generate_signals(
+            bars={"AAPL": df},
+            current_prices={"AAPL": 100.0},
+            portfolio_value=100_000.0,
+            open_positions=[],
+        )
+        assert signals == []
+
+    def test_empty_bars_no_signal(self):
+        strategy = self._strategy()
+        signals = strategy.generate_signals(
+            bars={"AAPL": pd.DataFrame()},
+            current_prices={},
+            portfolio_value=100_000.0,
+            open_positions=[],
+        )
+        assert signals == []
+
+
+# ---------------------------------------------------------------------------
+# VWAP Reversion strategy tests
+# ---------------------------------------------------------------------------
+
+from config import VWAPReversionConfig
+from strategies.vwap_reversion import VWAPReversionStrategy
+
+
+class TestVWAPReversionStrategy:
+    def _strategy(self):
+        cfg = VWAPReversionConfig(std_threshold=1.5, lookback_days=3)
+        return VWAPReversionStrategy(cfg, RISK_CFG)
+
+    def _make_ohlcv_with_vol(self, prices, volumes=None, start="2023-01-01"):
+        if volumes is None:
+            volumes = [1_000_000] * len(prices)
+        dates = pd.date_range(start=start, periods=len(prices), freq="B", tz="UTC")
+        return pd.DataFrame(
+            {
+                "open": prices,
+                "high": [p * 1.005 for p in prices],
+                "low": [p * 0.995 for p in prices],
+                "close": prices,
+                "volume": volumes,
+            },
+            index=dates,
+        )
+
+    def test_returns_list(self):
+        strategy = self._strategy()
+        prices = [100.0 + i * 0.1 for i in range(30)]
+        df = self._make_ohlcv_with_vol(prices)
+        result = strategy.generate_signals(
+            bars={"AAPL": df},
+            current_prices={"AAPL": float(prices[-1])},
+            portfolio_value=100_000.0,
+            open_positions=[],
+        )
+        assert isinstance(result, list)
+
+    def test_buy_signal_below_vwap(self):
+        """Price that crashes well below VWAP should generate a BUY."""
+        strategy = self._strategy()
+        # lookback=3: need 2*3 bars for spread_std to be valid; use 10+crash
+        prices = [100.0] * 10 + [80.0]
+        df = self._make_ohlcv_with_vol(prices)
+        signals = strategy.generate_signals(
+            bars={"AAPL": df},
+            current_prices={"AAPL": 80.0},
+            portfolio_value=100_000.0,
+            open_positions=[],
+        )
+        buy_signals = [s for s in signals if s.is_buy and s.symbol == "AAPL"]
+        assert len(buy_signals) == 1
+        assert buy_signals[0].quantity > 0
+
+    def test_sell_signal_at_vwap(self):
+        """Price reverting to VWAP with open position → SELL."""
+        strategy = self._strategy()
+        # Price falls well below VWAP then comes back to VWAP territory
+        prices = [100.0] * 10 + [80.0] * 5 + [100.0]
+        df = self._make_ohlcv_with_vol(prices)
+        signals = strategy.generate_signals(
+            bars={"AAPL": df},
+            current_prices={"AAPL": 100.0},
+            portfolio_value=100_000.0,
+            open_positions=["AAPL"],
+        )
+        sell_signals = [s for s in signals if s.is_sell and s.symbol == "AAPL"]
+        assert len(sell_signals) == 1
+
+    def test_no_signal_insufficient_data(self):
+        strategy = self._strategy()
+        df = self._make_ohlcv_with_vol([100.0] * 5)
+        signals = strategy.generate_signals(
+            bars={"AAPL": df},
+            current_prices={"AAPL": 100.0},
+            portfolio_value=100_000.0,
+            open_positions=[],
+        )
+        assert signals == []
+
+    def test_empty_bars_no_signal(self):
+        strategy = self._strategy()
+        signals = strategy.generate_signals(
+            bars={"AAPL": pd.DataFrame()},
+            current_prices={},
+            portfolio_value=100_000.0,
+            open_positions=[],
+        )
+        assert signals == []

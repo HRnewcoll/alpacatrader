@@ -64,6 +64,12 @@ class RiskConfig:
     take_profit_pct: float = field(
         default_factory=lambda: _env_float("TAKE_PROFIT_PCT", 4.0)
     )
+    trailing_stop_pct: float = field(
+        default_factory=lambda: _env_float("TRAILING_STOP_PCT", 0.0)
+    )
+    max_bid_ask_spread_pct: float = field(
+        default_factory=lambda: _env_float("MAX_BID_ASK_SPREAD_PCT", 0.0)
+    )
 
 
 @dataclass
@@ -127,6 +133,15 @@ class AlertConfig:
     smtp_user: str = field(default_factory=lambda: _env_str("SMTP_USER", ""))
     smtp_password: str = field(
         default_factory=lambda: _env_str("SMTP_PASSWORD", "")
+    )
+    telegram_token: str = field(
+        default_factory=lambda: _env_str("TELEGRAM_TOKEN", "")
+    )
+    telegram_chat_id: str = field(
+        default_factory=lambda: _env_str("TELEGRAM_CHAT_ID", "")
+    )
+    slack_webhook_url: str = field(
+        default_factory=lambda: _env_str("SLACK_WEBHOOK_URL", "")
     )
 
 
@@ -212,6 +227,36 @@ class DashboardConfig:
 
 
 @dataclass
+class BreakoutConfig:
+    lookback_days: int = field(
+        default_factory=lambda: _env_int("BREAKOUT_LOOKBACK_DAYS", 20)
+    )
+    volume_factor: float = field(
+        default_factory=lambda: _env_float("BREAKOUT_VOLUME_FACTOR", 1.5)
+    )
+
+
+@dataclass
+class VWAPReversionConfig:
+    std_threshold: float = field(
+        default_factory=lambda: _env_float("VWAP_STD_THRESHOLD", 1.5)
+    )
+    lookback_days: int = field(
+        default_factory=lambda: _env_int("VWAP_LOOKBACK_DAYS", 20)
+    )
+
+
+@dataclass
+class MultiTimeframeConfig:
+    enabled: bool = field(
+        default_factory=lambda: _env_bool("MTF_ENABLED", False)
+    )
+    trend_lookback_days: int = field(
+        default_factory=lambda: _env_int("MTF_TREND_LOOKBACK_DAYS", 20)
+    )
+
+
+@dataclass
 class AppConfig:
     alpaca: AlpacaConfig = field(default_factory=AlpacaConfig)
     risk: RiskConfig = field(default_factory=RiskConfig)
@@ -221,6 +266,13 @@ class AppConfig:
     momentum: MomentumConfig = field(default_factory=MomentumConfig)
     pairs_trading: PairsTradingConfig = field(
         default_factory=PairsTradingConfig
+    )
+    breakout: BreakoutConfig = field(default_factory=BreakoutConfig)
+    vwap_reversion: VWAPReversionConfig = field(
+        default_factory=VWAPReversionConfig
+    )
+    multi_timeframe: MultiTimeframeConfig = field(
+        default_factory=MultiTimeframeConfig
     )
     alerts: AlertConfig = field(default_factory=AlertConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)

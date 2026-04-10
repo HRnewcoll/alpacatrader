@@ -5,7 +5,9 @@ Handles:
 - Daily loss limits (circuit breaker)
 - Drawdown protection
 - Stop-loss and take-profit automation
+- Trailing stop-loss
 - Maximum open position limits
+- Realized P&L journal enrichment
 """
 from __future__ import annotations
 
@@ -28,6 +30,8 @@ class RiskManager:
         self.db_path = db_path
         self._daily_pnl: float = 0.0
         self._peak_portfolio_value: float = 0.0
+        # Trailing stop: symbol → highest price seen since entry
+        self._trailing_highs: Dict[str, float] = {}
         self._init_db()
 
     # ------------------------------------------------------------------
@@ -74,6 +78,14 @@ class RiskManager:
         order_id: str = "",
         pnl: float = 0.0,
     ) -> None:
+        # Auto-compute realized P&L when selling by matching the most recent open BUY
+        if side.lower() == "sell" and pnl == 0.0:
+            pnl = self._compute_realized_pnl(symbol, price, qty)
+            if pnl != 0.0:
+                self.update_daily_pnl(pnl, 0.0)
+                # Clear trailing high on close
+                self._trailing_highs.pop(symbol, None)
+
         ts = datetime.now(tz=timezone.utc).isoformat()
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(
@@ -87,6 +99,24 @@ class RiskManager:
         logger.info(
             "Trade recorded: %s %s %.4f @ $%.2f (pnl=%.2f)", side, symbol, qty, price, pnl
         )
+
+    def _compute_realized_pnl(self, symbol: str, sell_price: float, sell_qty: float) -> float:
+        """Compute realized P&L for a sell by finding the matching buy cost basis."""
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute(
+                """
+                SELECT price, qty FROM trades
+                WHERE symbol = ? AND side = 'buy'
+                ORDER BY timestamp DESC
+                LIMIT 1
+                """,
+                (symbol,),
+            ).fetchone()
+        if row is None:
+            return 0.0
+        avg_entry = float(row[0])
+        qty = float(row[1]) if sell_qty <= 0 else sell_qty
+        return round((sell_price - avg_entry) * qty, 4)
 
     def get_daily_pnl(self) -> float:
         today = date.today().isoformat()
@@ -186,6 +216,23 @@ class RiskManager:
 
     def compute_take_profit_price(self, entry_price: float) -> float:
         return round(entry_price * (1 + self.config.take_profit_pct / 100), 4)
+
+    def update_trailing_high(self, symbol: str, current_price: float) -> None:
+        """Update the trailing high-water mark for *symbol*."""
+        prev = self._trailing_highs.get(symbol, 0.0)
+        self._trailing_highs[symbol] = max(prev, current_price)
+
+    def compute_trailing_stop_price(self, symbol: str, entry_price: float) -> Optional[float]:
+        """Return the trailing stop price for *symbol*, or None if trailing stops are disabled.
+
+        Uses ``TRAILING_STOP_PCT`` percentage below the highest price seen since
+        entry.  Falls back to ``entry_price`` if no high-water mark has been
+        recorded yet.
+        """
+        if self.config.trailing_stop_pct <= 0:
+            return None
+        high = self._trailing_highs.get(symbol, entry_price)
+        return round(high * (1 - self.config.trailing_stop_pct / 100), 4)
 
     # ------------------------------------------------------------------
     # Signal filtering (main public interface)

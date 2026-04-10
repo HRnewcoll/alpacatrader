@@ -123,3 +123,89 @@ class TestRiskManager:
         assert "Daily P&L" in report
         assert "Weekly P&L" in report
         assert "Win Rate" in report
+
+
+class TestTrailingStop:
+    def test_trailing_stop_disabled_when_pct_zero(self, risk_manager):
+        """compute_trailing_stop_price returns None when trailing_stop_pct == 0."""
+        assert risk_manager.config.trailing_stop_pct == 0.0
+        result = risk_manager.compute_trailing_stop_price("AAPL", 100.0)
+        assert result is None
+
+    def test_trailing_stop_enabled(self, tmp_path):
+        cfg = RiskConfig(
+            max_portfolio_risk_pct=2.0,
+            max_daily_loss_pct=5.0,
+            max_position_size_pct=10.0,
+            max_open_positions=3,
+            stop_loss_pct=2.0,
+            take_profit_pct=4.0,
+            trailing_stop_pct=5.0,
+        )
+        rm = RiskManager(cfg, db_path=str(tmp_path / "ts_test.db"))
+        # No high watermark yet — falls back to entry price
+        stop = rm.compute_trailing_stop_price("AAPL", 100.0)
+        assert stop == pytest.approx(95.0, rel=1e-4)
+
+    def test_trailing_high_updates(self, tmp_path):
+        cfg = RiskConfig(
+            max_portfolio_risk_pct=2.0,
+            max_daily_loss_pct=5.0,
+            max_position_size_pct=10.0,
+            max_open_positions=3,
+            stop_loss_pct=2.0,
+            take_profit_pct=4.0,
+            trailing_stop_pct=10.0,
+        )
+        rm = RiskManager(cfg, db_path=str(tmp_path / "ts2_test.db"))
+        rm.update_trailing_high("AAPL", 150.0)
+        rm.update_trailing_high("AAPL", 140.0)  # should NOT lower the high
+        stop = rm.compute_trailing_stop_price("AAPL", 100.0)
+        assert stop == pytest.approx(135.0, rel=1e-4)  # 10% below 150
+
+    def test_trailing_high_cleared_on_sell(self, tmp_path):
+        cfg = RiskConfig(
+            max_portfolio_risk_pct=2.0,
+            max_daily_loss_pct=5.0,
+            max_position_size_pct=10.0,
+            max_open_positions=3,
+            stop_loss_pct=2.0,
+            take_profit_pct=4.0,
+            trailing_stop_pct=5.0,
+        )
+        rm = RiskManager(cfg, db_path=str(tmp_path / "ts3_test.db"))
+        rm.update_trailing_high("AAPL", 200.0)
+        assert "AAPL" in rm._trailing_highs
+        # Recording a sell should clear the trailing high
+        rm.record_trade("AAPL", "buy", 10, 150.0, "test")
+        rm.record_trade("AAPL", "sell", 10, 160.0, "test")
+        assert "AAPL" not in rm._trailing_highs
+
+
+class TestRealizedPnL:
+    def test_pnl_computed_on_sell(self, tmp_path):
+        """When a sell is recorded, P&L should be auto-computed from prior buy."""
+        cfg = RISK_CFG
+        rm = RiskManager(cfg, db_path=str(tmp_path / "pnl_test.db"))
+        rm.record_trade("AAPL", "buy", 10, 100.0, "test")
+        rm.record_trade("AAPL", "sell", 10, 120.0, "test")
+        history = rm.get_trade_history()
+        sell_trade = next(t for t in history if t["side"] == "sell")
+        assert sell_trade["pnl"] == pytest.approx(200.0, rel=1e-4)  # (120-100)*10
+
+    def test_pnl_negative_on_loss(self, tmp_path):
+        cfg = RISK_CFG
+        rm = RiskManager(cfg, db_path=str(tmp_path / "pnl_loss_test.db"))
+        rm.record_trade("MSFT", "buy", 5, 200.0, "test")
+        rm.record_trade("MSFT", "sell", 5, 180.0, "test")
+        history = rm.get_trade_history()
+        sell_trade = next(t for t in history if t["side"] == "sell")
+        assert sell_trade["pnl"] == pytest.approx(-100.0, rel=1e-4)  # (180-200)*5
+
+    def test_pnl_zero_when_no_prior_buy(self, tmp_path):
+        """Sell without a preceding buy should record zero P&L."""
+        cfg = RISK_CFG
+        rm = RiskManager(cfg, db_path=str(tmp_path / "pnl_nobuy_test.db"))
+        rm.record_trade("GOOG", "sell", 3, 150.0, "test")
+        history = rm.get_trade_history()
+        assert history[0]["pnl"] == 0.0

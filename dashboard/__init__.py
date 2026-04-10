@@ -188,6 +188,7 @@ class Dashboard:
         self._get_performance = get_performance_fn or (lambda: {})
         self._app = None
         self._thread: Optional[threading.Thread] = None
+        self._start_time: float = 0.0
 
     # ------------------------------------------------------------------
     # Flask app setup
@@ -247,6 +248,12 @@ class Dashboard:
                 signals = list(_signal_feed)
             return jsonify({"signals": signals})
 
+        @app.route("/health")
+        def health():
+            import time as _time
+            uptime = int(_time.time() - self._start_time) if self._start_time else 0
+            return jsonify({"status": "ok", "uptime_seconds": uptime})
+
         return app
 
     # ------------------------------------------------------------------
@@ -276,6 +283,8 @@ class Dashboard:
         if self._thread and self._thread.is_alive():
             return
 
+        import time as _time
+        self._start_time = _time.time()
         self._app = self._build_app()
         host = self.config.host
         port = self.config.port

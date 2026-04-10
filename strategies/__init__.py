@@ -3,6 +3,8 @@ from strategies.base_strategy import BaseStrategy, Signal, SignalType
 from strategies.mean_reversion import MeanReversionStrategy
 from strategies.momentum import MomentumStrategy
 from strategies.pairs_trading import PairsTradingStrategy
+from strategies.breakout import BreakoutStrategy
+from strategies.vwap_reversion import VWAPReversionStrategy
 
 __all__ = [
     "BaseStrategy",
@@ -11,4 +13,6 @@ __all__ = [
     "MeanReversionStrategy",
     "MomentumStrategy",
     "PairsTradingStrategy",
+    "BreakoutStrategy",
+    "VWAPReversionStrategy",
 ]

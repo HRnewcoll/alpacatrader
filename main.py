@@ -1,10 +1,11 @@
 """Advanced Alpaca Trading System - Main entry point.
 
-Supports four operating modes:
+Supports five operating modes:
   trade    - Run the live/paper trading loop (market-hours aware)
   backtest - Backtest strategies against historical data
   status   - Print current account and position status
   optimize - Grid-search strategy parameters and optionally write to .env
+  validate - Check paper-trading metrics before going live
 """
 from __future__ import annotations
 
@@ -12,6 +13,7 @@ import argparse
 import signal
 import sys
 import time
+import threading
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
@@ -27,9 +29,11 @@ from risk_manager import RiskManager
 from scheduler import MarketScheduler
 from screener import MarketScreener
 from strategies import (
+    BreakoutStrategy,
     MeanReversionStrategy,
     MomentumStrategy,
     PairsTradingStrategy,
+    VWAPReversionStrategy,
     Signal,
     SignalType,
 )
@@ -63,12 +67,17 @@ class TradingEngine:
             MeanReversionStrategy(config.mean_reversion, config.risk),
             MomentumStrategy(config.momentum, config.risk),
             PairsTradingStrategy(config.pairs_trading, config.risk),
+            BreakoutStrategy(config.breakout, config.risk),
+            VWAPReversionStrategy(config.vwap_reversion, config.risk),
         ]
 
         self._running = False
         self._last_portfolio_value: float = 0.0
         self._dynamic_watchlist: List[str] = list(config.watchlist)
         self._last_report_date: Optional[str] = None
+        # Watchdog: timestamp of last successful data fetch
+        self._last_successful_fetch: float = time.time()
+        self._watchdog_thread: Optional[threading.Thread] = None
 
     # ------------------------------------------------------------------
     # Symbol collection
@@ -152,6 +161,7 @@ class TradingEngine:
             self._last_portfolio_value = portfolio_value
             positions_list = self.data.get_positions()
             open_symbols = [p.symbol for p in positions_list]
+            self._last_successful_fetch = time.time()
         except Exception as exc:
             self.logger.error("Failed to fetch account data: %s", exc)
             self.alerter.error_alert(str(exc), "Account data fetch")
@@ -199,6 +209,14 @@ class TradingEngine:
             except Exception as exc:
                 self.logger.warning("News sentiment fetch failed: %s", exc)
 
+        # Fetch bid-ask snapshots for slippage guard (optional)
+        snapshots: Dict[str, Dict] = {}
+        if self.config.risk.max_bid_ask_spread_pct > 0:
+            try:
+                snapshots = self.data.get_snapshots(symbols)
+            except Exception as exc:
+                self.logger.warning("Snapshot fetch failed (slippage guard disabled): %s", exc)
+
         # Generate signals from all strategies
         all_signals: List[Signal] = []
         for strategy in self.strategies:
@@ -221,9 +239,17 @@ class TradingEngine:
             except Exception as exc:
                 self.logger.error("Strategy %s failed: %s", strategy.name, exc)
 
+        # Apply multi-timeframe confirmation filter (suppress BUY in bearish daily trend)
+        if self.config.multi_timeframe.enabled:
+            all_signals = self._apply_mtf_filter(all_signals, bars)
+
         # Apply news sentiment filter
         if sentiment:
             all_signals = self.news.filter_signals(all_signals, sentiment)
+
+        # Apply bid-ask slippage guard: drop BUYs where spread is too wide
+        if snapshots and self.config.risk.max_bid_ask_spread_pct > 0:
+            all_signals = self._apply_slippage_guard(all_signals, snapshots)
 
         # Filter by risk rules
         approved = self.risk.filter_signals(all_signals, portfolio_value, open_symbols)
@@ -256,7 +282,7 @@ class TradingEngine:
         )
 
     def _check_exits(self, positions_list, current_prices: Dict[str, float]) -> None:
-        """Check if any open positions hit stop-loss or take-profit."""
+        """Check if any open positions hit stop-loss, trailing stop, or take-profit."""
         for pos in positions_list:
             sym = pos.symbol
             current_price = current_prices.get(sym)
@@ -264,17 +290,25 @@ class TradingEngine:
                 continue
 
             avg_entry = float(pos.avg_entry_price)
-            stop = self.risk.compute_stop_loss_price(avg_entry)
+
+            # Update trailing high-water mark
+            self.risk.update_trailing_high(sym, current_price)
+
+            # Determine effective stop: trailing stop takes priority when enabled
+            trailing_stop = self.risk.compute_trailing_stop_price(sym, avg_entry)
+            stop = trailing_stop if trailing_stop is not None else self.risk.compute_stop_loss_price(avg_entry)
             target = self.risk.compute_take_profit_price(avg_entry)
 
             if current_price <= stop:
+                stop_type = "trailing_stop" if trailing_stop is not None else "stop_loss"
                 self.logger.info(
-                    "Stop-loss triggered for %s: price=%.2f stop=%.2f",
+                    "%s triggered for %s: price=%.2f stop=%.2f",
+                    stop_type,
                     sym,
                     current_price,
                     stop,
                 )
-                self._close_position_market(sym, current_price, "stop_loss")
+                self._close_position_market(sym, current_price, stop_type)
             elif current_price >= target:
                 self.logger.info(
                     "Take-profit triggered for %s: price=%.2f target=%.2f",
@@ -290,6 +324,102 @@ class TradingEngine:
             self.alerter.trade_alert(symbol, "CLOSE", 0, price, "risk_manager", reason)
         except Exception as exc:
             self.logger.error("Failed to close position %s: %s", symbol, exc)
+
+    # ------------------------------------------------------------------
+    # Multi-timeframe confirmation filter
+    # ------------------------------------------------------------------
+
+    def _apply_mtf_filter(
+        self, signals: List[Signal], bars: Dict[str, "pd.DataFrame"]
+    ) -> List[Signal]:
+        """Suppress BUY signals when the daily trend is bearish.
+
+        The daily trend is considered bearish when the current close is below
+        the *MTF_TREND_LOOKBACK_DAYS*-day simple moving average.
+        """
+        import pandas as pd
+
+        lookback = self.config.multi_timeframe.trend_lookback_days
+        filtered: List[Signal] = []
+        for sig in signals:
+            if not sig.is_buy:
+                filtered.append(sig)
+                continue
+            df = bars.get(sig.symbol)
+            if df is None or df.empty or len(df) < lookback:
+                filtered.append(sig)
+                continue
+            sma = float(df["close"].rolling(lookback).mean().iloc[-1])
+            current = float(df["close"].iloc[-1])
+            if current < sma:
+                self.logger.debug(
+                    "MTF filter: suppressing BUY %s (price %.2f < SMA %.2f)",
+                    sig.symbol,
+                    current,
+                    sma,
+                )
+            else:
+                filtered.append(sig)
+        return filtered
+
+    # ------------------------------------------------------------------
+    # Bid-ask slippage guard
+    # ------------------------------------------------------------------
+
+    def _apply_slippage_guard(
+        self, signals: List[Signal], snapshots: Dict[str, Dict]
+    ) -> List[Signal]:
+        """Drop BUY signals where the bid-ask spread exceeds the configured maximum."""
+        max_spread = self.config.risk.max_bid_ask_spread_pct
+        filtered: List[Signal] = []
+        for sig in signals:
+            if not sig.is_buy:
+                filtered.append(sig)
+                continue
+            snap = snapshots.get(sig.symbol)
+            if snap is None:
+                filtered.append(sig)
+                continue
+            spread_pct = snap.get("bid_ask_spread_pct", 0.0)
+            if spread_pct > max_spread:
+                self.logger.info(
+                    "Slippage guard: dropping BUY %s (spread=%.3f%% > max=%.3f%%)",
+                    sig.symbol,
+                    spread_pct,
+                    max_spread,
+                )
+            else:
+                filtered.append(sig)
+        return filtered
+
+    # ------------------------------------------------------------------
+    # Reconnect watchdog
+    # ------------------------------------------------------------------
+
+    def _start_watchdog(self, stale_seconds: int = 600) -> None:
+        """Start a background thread that reinitialises the data client if it goes stale."""
+
+        def _watchdog():
+            while self._running:
+                time.sleep(60)
+                gap = time.time() - self._last_successful_fetch
+                if gap > stale_seconds:
+                    self.logger.warning(
+                        "Watchdog: no successful data fetch for %.0fs — reinitialising clients",
+                        gap,
+                    )
+                    try:
+                        self.data.reinit_clients()
+                        self._last_successful_fetch = time.time()
+                        self.logger.info("Watchdog: clients reinitialised successfully")
+                    except Exception as exc:
+                        self.logger.error("Watchdog: reinit failed: %s", exc)
+
+        self._watchdog_thread = threading.Thread(
+            target=_watchdog, name="watchdog", daemon=True
+        )
+        self._watchdog_thread.start()
+        self.logger.info("Reconnect watchdog started (stale threshold=%ds)", stale_seconds)
 
     def _execute_signal(self, sig: Signal, portfolio_value: float) -> None:
         """Execute a trade signal."""
@@ -371,6 +501,9 @@ class TradingEngine:
         self.dashboard.start()
 
         self._running = True
+        # Start reconnect watchdog
+        self._start_watchdog()
+
         _warmup_done_today: Optional[str] = None
 
         while self._running:
@@ -527,6 +660,99 @@ def cmd_trade(config: AppConfig, interval: int = 300) -> None:
     engine.run(interval_seconds=interval)
 
 
+def cmd_validate(config: AppConfig, days: int = 30, min_trades: int = 20) -> int:
+    """Gate paper-to-live promotion by validating SQLite trade history.
+
+    Checks:
+    - At least *min_trades* completed sell trades in the last *days* days.
+    - Annualised Sharpe ratio ≥ 1.0 (from daily P&L).
+    - Max drawdown ≤ 15 %.
+
+    Returns 0 (pass) or 1 (fail).
+    """
+    import sqlite3
+    import math
+
+    setup_logging(config.log_level, config.log_dir)
+    sep = "=" * 55
+
+    cutoff = (datetime.now(tz=timezone.utc) - timedelta(days=days)).strftime(
+        "%Y-%m-%d"
+    )
+
+    with sqlite3.connect(config.db_path) as conn:
+        # Count completed sell trades
+        trade_count = conn.execute(
+            "SELECT COUNT(*) FROM trades WHERE side='sell' AND timestamp >= ?",
+            (cutoff + "T00:00:00",),
+        ).fetchone()[0]
+
+        # Daily P&L rows
+        rows = conn.execute(
+            "SELECT trade_date, realized_pnl, starting_portfolio_value "
+            "FROM daily_pnl WHERE trade_date >= ? ORDER BY trade_date",
+            (cutoff,),
+        ).fetchall()
+
+    print(f"\n{sep}")
+    print(f"  PAPER-TO-LIVE VALIDATION — last {days} days")
+    print(sep)
+
+    # ---- Trade count check ----
+    trade_ok = trade_count >= min_trades
+    print(f"  Completed trades  : {trade_count:>5}  (min {min_trades})  {'✓' if trade_ok else '✗'}")
+
+    # ---- Sharpe ratio (annualised) ----
+    sharpe_ok = False
+    sharpe = 0.0
+    if rows:
+        import statistics
+
+        pnl_vals = [r[1] for r in rows]
+        start_vals = [r[2] for r in rows if r[2] > 0]
+        avg_start = statistics.mean(start_vals) if start_vals else 100_000.0
+        daily_returns = [p / avg_start for p in pnl_vals]
+        mean_ret = statistics.mean(daily_returns)
+        std_ret = statistics.stdev(daily_returns) if len(daily_returns) > 1 else 0.0
+        if std_ret == 0:
+            # All returns identical: infinite Sharpe when positive, 0 when non-positive
+            sharpe = float("inf") if mean_ret > 0 else 0.0
+        else:
+            sharpe = mean_ret / std_ret * math.sqrt(252)
+        sharpe_ok = sharpe >= 1.0
+
+    print(f"  Sharpe ratio      : {sharpe:>7.3f}  (min 1.0)  {'✓' if sharpe_ok else '✗'}")
+
+    # ---- Max drawdown ----
+    max_dd_ok = False
+    max_dd_pct = 0.0
+    if rows:
+        peak = 0.0
+        max_dd = 0.0
+        equity = 0.0
+        for _, pnl, start_val in rows:
+            equity += pnl
+            if equity > peak:
+                peak = equity
+            dd = (peak - equity) / abs(peak) if peak != 0 else 0.0
+            if dd > max_dd:
+                max_dd = dd
+        max_dd_pct = max_dd * 100
+        max_dd_ok = max_dd_pct <= 15.0
+
+    print(f"  Max drawdown      : {max_dd_pct:>7.2f}%  (max 15.0%)  {'✓' if max_dd_ok else '✗'}")
+
+    passed = trade_ok and sharpe_ok and max_dd_ok
+    print(sep)
+    if passed:
+        print("  RESULT: PASS — safe to switch TRADING_MODE=live")
+    else:
+        print("  RESULT: FAIL — continue paper trading before going live")
+    print(sep + "\n")
+
+    return 0 if passed else 1
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description="Advanced Alpaca Trading System",
@@ -578,6 +804,24 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Write best params back to .env",
     )
 
+    # validate
+    val_parser = subparsers.add_parser(
+        "validate",
+        help="Validate paper-trading metrics before switching to live mode",
+    )
+    val_parser.add_argument(
+        "--days",
+        type=int,
+        default=30,
+        help="Number of historical days to evaluate (default: 30)",
+    )
+    val_parser.add_argument(
+        "--min-trades",
+        type=int,
+        default=20,
+        help="Minimum number of completed trades required (default: 20)",
+    )
+
     args = parser.parse_args(argv)
 
     config = AppConfig()
@@ -599,6 +843,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         cmd_status(config)
     elif args.command == "optimize":
         cmd_optimize(config, months=args.months, write_env=args.write_env)
+    elif args.command == "validate":
+        return cmd_validate(config, days=args.days, min_trades=args.min_trades)
     else:
         parser.print_help()
         return 0

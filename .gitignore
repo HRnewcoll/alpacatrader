@@ -1,66 +1,66 @@
 ```
 # Python
 __pycache__/
-*.py[cod]
-*$py.class
-*.so
+*.pyc
+*.pyo
+*.pyd
 .Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-
-# Database
-*.db
-*.db-journal
-
-# Machine Learning models
-*.pkl
-*.model
-*.h5
-*.pb
+env/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.log
+.pytest_cache/
+.mypy_cache/
 
 # Environment
 .env
 .env.local
 .env.*
-.env~*
-.venv/
-venv/
-ENV/
 
-# IDE
-.vscode/
-.idea/
+# Compiled and build artifacts
+*.o
+*.obj
+*.out
+*.exe
+*.dll
+*.so
+*.a
+build/
+dist/
+target/
+.gradle/
+
+# Dependencies
+node_modules/
+.julia/
+zig*/
+julia-*/
+
+# Logs and temp files
+*.log
+*.tmp
 *.swp
 *.swo
-*.tmp
 
-# Logs
-*.log
+# Editors
+.vscode/
+.idea/
 
-# Coverage
-.coverage
-coverage/
-htmlcov/
-
-# Testing
-.pytest_cache/
-.mypy_cache/
-.hypothesis/
-
-# OS
+# System files
 .DS_Store
 Thumbs.db
+
+# Coverage
+coverage/
+htmlcov/
+.coverage
 ```
